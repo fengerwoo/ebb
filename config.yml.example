@@ -1,35 +1,35 @@
-# ebb 配置示例：复制为 config.yml 后按需修改
-# 默认读取 /etc/ebb/config.yml，可用环境变量 EBB_CONFIG 或 `ebb -c` 覆盖
+# ebb 配置示例：复制为 config.yml 后按需修改。Example ebb config: copy to config.yml and edit as needed.
+# 默认读取 /etc/ebb/config.yml，可用环境变量 EBB_CONFIG 或 `ebb -c` 覆盖。Reads /etc/ebb/config.yml by default; override with env var EBB_CONFIG or `ebb -c`.
 
-# MySQL 数据源（可配多个）
+# MySQL 数据源（可配多个）。MySQL sources (multiple allowed).
 sources:
   prod-db:
     dsn: "mysql://user:password@mysql.example.com:3306/appdb"
 
-# S3 兼容对象存储（可配多个）：AWS S3 / 阿里云 OSS / 腾讯云 COS / MinIO
+# S3 兼容对象存储（可配多个）：AWS S3 / 阿里云 OSS / 腾讯云 COS / MinIO。S3-compatible object storage (multiple allowed): AWS S3 / Alibaba Cloud OSS / Tencent Cloud COS / MinIO.
 storages:
-  # 阿里云 OSS
+  # 阿里云 OSS。Alibaba Cloud OSS.
   my-oss:
     type: s3
-    endpoint: "oss-cn-hangzhou.aliyuncs.com"   # 不要带 bucket 前缀
+    endpoint: "oss-cn-hangzhou.aliyuncs.com"   # 不要带 bucket 前缀。Do not include the bucket prefix.
     bucket: my-archive-bucket
     access_key_id: "LTAI..."
     secret_access_key: "..."
     region: "cn-hangzhou"
-    url_style: vhost          # OSS / COS 用 vhost
+    url_style: vhost          # OSS / COS 用 vhost。Use vhost for OSS / COS.
     use_ssl: true
 
-  # 腾讯云 COS（注意 region 写在 endpoint 里）
+  # 腾讯云 COS（注意 region 写在 endpoint 里）。Tencent Cloud COS (note: the region is part of the endpoint).
   # my-cos:
   #   type: s3
   #   endpoint: "cos.ap-guangzhou.myqcloud.com"
-  #   bucket: my-archive-1250000000        # COS bucket 名带 appid 后缀
+  #   bucket: my-archive-1250000000        # COS bucket 名带 appid 后缀。COS bucket names carry an appid suffix.
   #   access_key_id: "AKID..."
   #   secret_access_key: "..."
   #   region: "ap-guangzhou"
   #   url_style: vhost
 
-  # AWS S3（endpoint 留空走官方端点）
+  # AWS S3（endpoint 留空走官方端点）。AWS S3 (leave endpoint empty to use the official endpoint).
   # my-s3:
   #   type: s3
   #   bucket: my-archive-bucket
@@ -37,7 +37,7 @@ storages:
   #   secret_access_key: "..."
   #   region: "us-east-1"
 
-  # MinIO / 自建（path 风格 + 可关 SSL）
+  # MinIO / 自建（path 风格 + 可关 SSL）。MinIO / self-hosted (path style, SSL optional).
   # my-minio:
   #   type: s3
   #   endpoint: "http://minio.internal:9000"
@@ -47,33 +47,35 @@ storages:
   #   url_style: path
   #   use_ssl: false
 
-# job = 一张表的完整管道（增量导出 / 每日合并 / 校验删除，水位互相独立）
+# job = 一张表的完整管道（增量导出 / 每日合并 / 校验删除，水位互相独立）。A job is the full pipeline for one table (incremental export / daily compaction / verified purge), each with an independent watermark.
 jobs:
   - name: app-logs
     source: prod-db
     table: logs
-    cursor_column: id              # 自增整数主键（游标）
-    time_column: created_at        # 用于推导日期分区的时间字段
+    cursor_column: id              # 自增整数主键（游标）。Auto-increment integer primary key (the cursor).
+    time_column: created_at        # 用于推导日期分区的时间字段。Time column used to derive the date partition.
     time_column_type: unix_s       # unix_s / unix_ms / unix_us / datetime / timestamp
-    timezone: Asia/Shanghai        # int 时间戳转日期、无时区 datetime 解释时使用
+    timezone: Asia/Shanghai        # int 时间戳转日期、无时区 datetime 解释时使用。Used to convert integer timestamps to dates and to interpret naive datetimes.
     storage: my-oss
-    prefix: archive/app-logs       # 对象存储内的根前缀，分区目录直接挂在其下
+    prefix: archive/app-logs       # 对象存储内的根前缀，分区目录直接挂在其下。Root prefix in object storage; partition dirs live directly under it.
     schedule:
-      enabled: false               # 是否参与 serve 调度（配置缺省为 true；建议新表先 false，首次回填到昨天后再开启）；false 时仅可手动 run/compact/purge
-      interval_seconds: 300        # 增量导出周期（秒）
-      compact_at: "03:00"          # 每日合并时刻（job 时区），合并后顺带 purge
-      # purge_interval_seconds: 3600 # 设置后 purge 按该间隔独立调度（保留期短于一天时必配，否则每天只删一次），每日任务只做合并
+      enabled: false               # 是否参与 serve 调度（配置缺省为 true；建议新表先 false，首次回填到昨天后再开启）；false 时仅可手动 run/compact/purge。Whether this job is scheduled by serve (defaults to true; for new tables start with false, enable after the initial backfill reaches yesterday); when false, only manual run/compact/purge.
+      interval_seconds: 300        # 增量导出周期（秒）。Incremental export interval in seconds.
+      compact_at: "03:00"          # 每日合并时刻（job 时区），合并后顺带 purge。Daily compaction time (job timezone); purge runs right after.
+      # purge_interval_seconds: 3600 # 设置后 purge 按该间隔独立调度（保留期短于一天时必配，否则每天只删一次），每日任务只做合并。When set, purge is scheduled independently at this interval (required if retention < 1 day, otherwise deletion happens only once per day), and the daily task only compacts.
     batch:
-      export_rows: 500000          # 单轮导出行数上限，追不平下一轮继续
-      delete_rows: 5000            # 删除批大小
-      delete_sleep_ms: 200         # 删除批间隔（毫秒）
-      safety_lag_seconds: 5        # 只导出早于 now-N秒 的行，规避自增 id 提交乱序漏读
+      export_rows: 500000          # 单轮导出行数上限，追不平下一轮继续。Per-round export row cap; the next round continues if behind.
+      delete_rows: 5000            # 删除批大小。Delete batch size.
+      delete_sleep_ms: 200         # 删除批间隔（毫秒）。Pause between delete batches in milliseconds.
+      safety_lag_seconds: 5        # 只导出早于 now-N秒 的行，规避自增 id 提交乱序漏读。Only export rows older than now - N seconds, avoiding misses from out-of-order auto-increment id commits.
     retention:
-      online_retain_seconds: 86400 # 线上保留时长（秒），86400 = 1 天
-      verify_before_delete: true   # 99%情况保持true，删除前对比 MySQL 与 Parquet 行数 + id 和
+      online_retain_seconds: 86400 # 线上保留时长（秒），86400 = 1 天。Online retention in seconds; 86400 = 1 day.
+      verify_before_delete: true   # 99%情况保持true，删除前对比 MySQL 与 Parquet 行数 + id 和。Keep true in 99% of cases; before deleting, compare row count + id sum between MySQL and Parquet.
 
 # HTTP 查询 API（可选）。POST /query {"sql": "SELECT ..."}，
 # Header: Authorization: Bearer <key>。每个 job 自动注册同名视图（默认取表名）。
+# Optional HTTP query API. POST /query {"sql": "SELECT ..."} with header
+# Authorization: Bearer <key>; each job auto-registers a view of the same name (defaults to the table name).
 query_api:
   enabled: false
   listen: "0.0.0.0:18761"
@@ -82,6 +84,6 @@ query_api:
   max_rows: 100000
   timeout_seconds: 60
 
-# 本地管理端点（ebb ps 读取），只监听回环地址，一般无需修改
+# 本地管理端点（ebb ps 读取），只监听回环地址，一般无需修改。Local admin endpoint (read by `ebb ps`); loopback only, rarely needs changing.
 admin:
   listen: "127.0.0.1:18762"
