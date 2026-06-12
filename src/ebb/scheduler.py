@@ -2,7 +2,8 @@
 
 - 每个 job 一个增量导出定时任务（interval_seconds），启动时立刻先跑一轮；
 - 每日 compact_at（job 时区）触发合并：合并所有「早于今天且仍有 inc 文件」
-  的分区（含补漏），随后执行 purge；
+  的分区（含补漏），随后执行 purge；若配置了 purge_interval_seconds，
+  purge 改为按该间隔独立调度，每日任务只做合并；
 - APScheduler max_instances=1 + coalesce=True：上一轮没结束就跳过本轮；
 - SIGTERM/SIGINT 优雅退出：等当前批次做完。
 """
@@ -39,6 +40,20 @@ def _run_export_job(config: Config, job: JobConfig, registry: Registry) -> None:
         registry.finish(job.name, "export", error=f"{type(exc).__name__}: {exc}")
 
 
+def _run_purge_job(config: Config, job: JobConfig, registry: Registry) -> None:
+    registry.start(job.name, "purge")
+    try:
+        result = purge.run_purge(
+            config,
+            job,
+            on_progress=lambda p: registry.progress(job.name, "purge", p),
+        )
+        registry.finish(job.name, "purge", result=result)
+    except Exception as exc:  # noqa: BLE001
+        log_error("purge", exc=exc, job=job.name)
+        registry.finish(job.name, "purge", error=f"{type(exc).__name__}: {exc}")
+
+
 def _run_daily_job(config: Config, job: JobConfig, registry: Registry) -> None:
     """每日合并（含补漏）+ 清理。合并失败则跳过清理（清理依赖归档完整）。"""
     registry.start(job.name, "compact")
@@ -61,17 +76,9 @@ def _run_daily_job(config: Config, job: JobConfig, registry: Registry) -> None:
 
     if not compact_ok:
         return
-    registry.start(job.name, "purge")
-    try:
-        result = purge.run_purge(
-            config,
-            job,
-            on_progress=lambda p: registry.progress(job.name, "purge", p),
-        )
-        registry.finish(job.name, "purge", result=result)
-    except Exception as exc:  # noqa: BLE001
-        log_error("purge", exc=exc, job=job.name)
-        registry.finish(job.name, "purge", error=f"{type(exc).__name__}: {exc}")
+    if job.schedule.purge_interval_seconds:
+        return  # purge 由独立的间隔任务负责
+    _run_purge_job(config, job, registry)
 
 
 class _UvicornThread(threading.Thread):
@@ -116,10 +123,25 @@ def serve(config: Config, stop_event: threading.Event | None = None) -> None:
             max_instances=1,
             coalesce=True,
         )
+        if job.schedule.purge_interval_seconds:
+            # 独立 purge 周期（保留期短于一天的场景）。与凌晨 compact 可能并发：
+            # 合并改名与删源之间的瞬间会让校验多算一次行数，校验失败即跳过本轮，
+            # 下一轮重新推导边界继续，无正确性风险。
+            scheduler.add_job(
+                _run_purge_job,
+                IntervalTrigger(seconds=job.schedule.purge_interval_seconds),
+                args=(config, job, registry),
+                id=f"purge:{job.name}",
+                max_instances=1,
+                coalesce=True,
+            )
 
     def _refresh_next_runs() -> None:
         for job in scheduled_jobs:
-            for kind, job_id in (("export", f"export:{job.name}"), ("compact", f"daily:{job.name}")):
+            kinds = [("export", f"export:{job.name}"), ("compact", f"daily:{job.name}")]
+            if job.schedule.purge_interval_seconds:
+                kinds.append(("purge", f"purge:{job.name}"))
+            for kind, job_id in kinds:
                 aps_job = scheduler.get_job(job_id)
                 registry.set_next_run(
                     job.name, kind, aps_job.next_run_time if aps_job else None

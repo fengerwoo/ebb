@@ -107,12 +107,24 @@ def run_purge(
         )
         result.eligible_rows = eligible
 
+    if on_progress:
+        on_progress(
+            {
+                "stage": "plan",
+                "watermark": watermark,
+                "bound_id": bound,
+                "eligible_rows": eligible,
+            }
+        )
+
     if dry_run:
         result.status = "dry-run"
         result.duration_seconds = round(time.monotonic() - started, 3)
         return result
 
     if job.retention.verify_before_delete:
+        if on_progress:
+            on_progress({"stage": "verify", "from_id": low, "to_id": bound})
         ok, detail = _verify_archived(config, job, low, bound)
         result.detail = detail
         if not ok:
@@ -121,6 +133,7 @@ def run_purge(
             log("purge", job=job.name, status="verify-failed", detail=detail, level="error")
             return result
 
+    delete_started = time.monotonic()
     with mysqlutil.connect(source) as conn:
         while True:
             affected = mysqlutil.delete_batch(
@@ -133,10 +146,12 @@ def run_purge(
             if on_progress:
                 on_progress(
                     {
+                        "stage": "delete",
                         "eligible_rows": result.eligible_rows,
                         "deleted_rows": result.deleted_rows,
                         "batches": result.batches,
                         "bound_id": bound,
+                        "elapsed_seconds": time.monotonic() - delete_started,
                     }
                 )
             if job.batch.delete_sleep_ms > 0:

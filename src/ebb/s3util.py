@@ -23,6 +23,10 @@ def make_client(storage: StorageConfig):
         config=BotoConfig(
             s3={"addressing_style": addressing},
             retries={"max_attempts": 3, "mode": "standard"},
+            # boto3>=1.36 默认对上传启用 aws-chunked 流式校验和，
+            # 阿里云 OSS / 腾讯云 COS 等不支持，改回仅必需时计算
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
         ),
     )
 
@@ -65,12 +69,10 @@ class S3Store:
         self.client.delete_object(Bucket=self.bucket, Key=src_key)
 
     def delete_keys(self, keys: list[str]) -> None:
-        for i in range(0, len(keys), 1000):
-            chunk = keys[i : i + 1000]
-            self.client.delete_objects(
-                Bucket=self.bucket,
-                Delete={"Objects": [{"Key": k} for k in chunk], "Quiet": True},
-            )
+        # 不用批量 DeleteObjects：botocore>=1.36 对其强制附加 CRC32 校验头，
+        # 阿里云 OSS 只认 Content-MD5 会报 MissingArgument；控制面删除量很小，逐个删即可
+        for key in keys:
+            self.client.delete_object(Bucket=self.bucket, Key=key)
 
     def put_probe(self, key: str, body: bytes = b"ebb") -> None:
         self.client.put_object(Bucket=self.bucket, Key=key, Body=body)

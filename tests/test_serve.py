@@ -11,6 +11,7 @@ from ebb.scheduler import serve
 from conftest import create_log_table, hours_ago, insert_rows, make_config
 
 ADMIN_PORT = 38082
+ADMIN_PORT_PURGE = 38083
 
 
 @pytest.fixture()
@@ -32,8 +33,8 @@ def served(mysql_conn, uniq):
     assert not t.is_alive()
 
 
-def _wait_admin(predicate, timeout=30):
-    url = f"http://127.0.0.1:{ADMIN_PORT}/admin/jobs"
+def _wait_admin(predicate, timeout=30, port=ADMIN_PORT):
+    url = f"http://127.0.0.1:{port}/admin/jobs"
     deadline = time.time() + timeout
     last = None
     while time.time() < deadline:
@@ -80,3 +81,36 @@ def test_serve_exports_on_schedule_and_reports(served, mysql_conn):
             (e.get("last_result") or {}).get("watermark_after") == 55 for e in jobs
         )
     )
+
+
+def test_serve_purge_on_interval(mysql_conn, uniq):
+    """purge_interval_seconds：不等每日 compact，按间隔独立删除过期数据。"""
+    table = f"logs_{uniq}"
+    prefix = f"t/{uniq}"
+    config = make_config(table, prefix, retain_seconds=3600)
+    config.jobs[0].schedule.interval_seconds = 2
+    config.jobs[0].schedule.purge_interval_seconds = 2
+    config.admin.listen = f"127.0.0.1:{ADMIN_PORT_PURGE}"
+    create_log_table(mysql_conn, table)
+    insert_rows(mysql_conn, table, [hours_ago(2)] * 30)  # 全部早于保留期
+
+    stop = threading.Event()
+    t = threading.Thread(target=serve, args=(config,), kwargs={"stop_event": stop})
+    t.start()
+    try:
+        # 导出先归档，随后的 purge 轮把 30 行全删掉
+        _wait_admin(
+            lambda jobs: any(
+                e["kind"] == "purge"
+                and (e.get("last_result") or {}).get("deleted_rows") == 30
+                for e in jobs
+            ),
+            port=ADMIN_PORT_PURGE,
+        )
+    finally:
+        stop.set()
+        t.join(timeout=30)
+    assert not t.is_alive()
+    with mysql_conn.cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) FROM `{table}`")
+        assert cur.fetchone()[0] == 0

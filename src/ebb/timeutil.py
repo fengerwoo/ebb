@@ -13,11 +13,35 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from .config import JobConfig
 
 _FACTOR = {"unix_s": 1, "unix_ms": 1_000, "unix_us": 1_000_000}
+
+
+def mysql_min_time_expr(job: JobConfig) -> str:
+    """取时间列最小值的 SQL 表达式（推导线上最早一天用）。
+
+    timestamp 列转成 UTC epoch 秒返回，规避会话时区对渲染值的影响。
+    """
+    col = f"`{job.time_column}`"
+    if job.time_column_type == "timestamp":
+        return f"UNIX_TIMESTAMP(MIN({col}))"
+    return f"MIN({col})"
+
+
+def local_date_of(job: JobConfig, value) -> date:
+    """把 mysql_min_time_expr 的查询结果转成 job 时区下的日期。"""
+    t = job.time_column_type
+    if t in _FACTOR:
+        return datetime.fromtimestamp(int(value) / _FACTOR[t], tz=job.tzinfo).date()
+    if t == "timestamp":  # 已被 UNIX_TIMESTAMP 转为 epoch 秒
+        return datetime.fromtimestamp(float(value), tz=job.tzinfo).date()
+    # datetime：无时区墙钟，按 job 时区解释，日期即墙钟日期
+    if isinstance(value, datetime):
+        return value.date()
+    return date.fromisoformat(str(value)[:10])
 
 
 def _ensure_aware(job: JobConfig, local: datetime) -> datetime:

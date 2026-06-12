@@ -59,9 +59,10 @@ jobs:
     storage: my-oss
     prefix: archive/app-logs       # 对象存储内的根前缀，分区目录直接挂在其下
     schedule:
-      enabled: true                # 是否参与 serve 调度（默认 true）；false 时仅可手动 run/compact/purge
+      enabled: false               # 是否参与 serve 调度（配置缺省为 true；建议新表先 false，首次回填到昨天后再开启）；false 时仅可手动 run/compact/purge
       interval_seconds: 300        # 增量导出周期（秒）
       compact_at: "03:00"          # 每日合并时刻（job 时区），合并后顺带 purge
+      # purge_interval_seconds: 3600 # 设置后 purge 按该间隔独立调度（保留期短于一天时必配，否则每天只删一次），每日任务只做合并
     batch:
       export_rows: 500000          # 单轮导出行数上限，追不平下一轮继续
       delete_rows: 5000            # 删除批大小
@@ -69,7 +70,7 @@ jobs:
       safety_lag_seconds: 5        # 只导出早于 now-N秒 的行，规避自增 id 提交乱序漏读
     retention:
       online_retain_seconds: 86400 # 线上保留时长（秒），86400 = 1 天
-      verify_before_delete: true   # 删除前对比 MySQL 与 Parquet 行数 + id 和
+      verify_before_delete: true   # 99%情况保持true，删除前对比 MySQL 与 Parquet 行数 + id 和
 
 # HTTP 查询 API（可选）。POST /query {"sql": "SELECT ..."}，
 # Header: Authorization: Bearer <key>。每个 job 自动注册同名视图（默认取表名）。

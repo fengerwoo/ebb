@@ -44,22 +44,24 @@ def check_job(config: Config, job: JobConfig) -> CheckReport:
     try:
         with mysqlutil.connect(source) as conn:
             columns = mysqlutil.table_columns(conn, job.table)
-        report.add("mysql.connect", True, f"表 {job.table} 共 {len(columns)} 列")
+        report.add("mysql.connect", True, f"table {job.table} has {len(columns)} columns")
     except Exception as exc:
         report.add("mysql.connect", False, f"{type(exc).__name__}: {exc}")
 
     if columns:
         cur_type = columns.get(job.cursor_column)
         if cur_type is None:
-            report.add("mysql.cursor_column", False, f"列不存在: {job.cursor_column}")
+            report.add("mysql.cursor_column", False, f"column not found: {job.cursor_column}")
         elif not any(cur_type.startswith(t) for t in INT_TYPES):
-            report.add("mysql.cursor_column", False, f"游标列必须是整数类型, 实际: {cur_type}")
+            report.add(
+                "mysql.cursor_column", False, f"cursor column must be an integer type, got: {cur_type}"
+            )
         else:
             report.add("mysql.cursor_column", True, cur_type)
 
         time_type = columns.get(job.time_column)
         if time_type is None:
-            report.add("mysql.time_column", False, f"列不存在: {job.time_column}")
+            report.add("mysql.time_column", False, f"column not found: {job.time_column}")
         else:
             expects_int = job.time_column_type.startswith("unix_")
             is_int = any(time_type.startswith(t) for t in INT_TYPES)
@@ -67,7 +69,7 @@ def check_job(config: Config, job: JobConfig) -> CheckReport:
                 report.add(
                     "mysql.time_column",
                     False,
-                    f"time_column_type={job.time_column_type} 与实际类型 {time_type} 不匹配",
+                    f"time_column_type={job.time_column_type} does not match actual type {time_type}",
                 )
             else:
                 report.add("mysql.time_column", True, time_type)

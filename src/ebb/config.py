@@ -80,6 +80,9 @@ class ScheduleConfig(BaseModel):
     enabled: bool = True  # 是否参与 serve 调度；关闭后仅可手动执行（便于测试）
     interval_seconds: int = Field(default=300, ge=1)  # 增量导出周期
     compact_at: str = "03:00"  # 每日合并时刻（job 时区），合并后顺带 purge
+    # 设置后 purge 按该间隔独立调度（保留期短于一天时必配，否则每天只删一次）；
+    # 此时每日任务只做合并，不再顺带 purge。
+    purge_interval_seconds: int | None = Field(default=None, ge=1)
 
     @field_validator("compact_at")
     @classmethod
@@ -209,7 +212,7 @@ class Config(BaseModel):
         for j in self.jobs:
             if j.name == name:
                 return j
-        raise KeyError(f"job 不存在: {name}")
+        raise KeyError(f"job not found: {name}")
 
     def source_of(self, job: JobConfig) -> SourceConfig:
         return self.sources[job.source]

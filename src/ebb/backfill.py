@@ -17,11 +17,11 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Callable
 
-from . import engine, naming
+from . import engine, mysqlutil, naming
 from .config import Config, JobConfig
 from .logs import log
 from .s3util import S3Store
-from .timeutil import duckdb_dt_expr, mysql_time_predicate
+from .timeutil import duckdb_dt_expr, local_date_of, mysql_min_time_expr, mysql_time_predicate
 
 
 @dataclass
@@ -42,13 +42,40 @@ class BackfillResult:
     duration_seconds: float = 0.0
 
 
-def _day_sql(job: JobConfig, day: date) -> str:
-    start = datetime(day.year, day.month, day.day, tzinfo=job.tzinfo)
-    end = start + timedelta(days=1)
+def earliest_day(config: Config, job: JobConfig) -> date | None:
+    """线上数据最早一天（job 时区）；表为空返回 None。CLI 缺省 --from 时使用。"""
+    source = config.source_of(job)
+    with mysqlutil.connect(source) as conn:
+        v = mysqlutil.fetch_value(
+            conn, f"SELECT {mysql_min_time_expr(job)} FROM `{job.table}`"
+        )
+    return local_date_of(job, v) if v is not None else None
+
+
+def _range_predicate(job: JobConfig, from_day: date, to_day: date) -> str:
+    """[from_day 00:00, to_day+1 00:00)（job 时区）的 MySQL 时间谓词。"""
+    start = datetime(from_day.year, from_day.month, from_day.day, tzinfo=job.tzinfo)
+    end = datetime(to_day.year, to_day.month, to_day.day, tzinfo=job.tzinfo) + timedelta(days=1)
     pred_lo = mysql_time_predicate(job, ">=", start)
     pred_hi = mysql_time_predicate(job, "<", end)
+    return f"{pred_lo} AND {pred_hi}"
+
+
+def count_rows_between(config: Config, job: JobConfig, from_day: date, to_day: date) -> int:
+    """统计回填区间内的线上总行数，用于行级进度与剩余时间估算。"""
+    source = config.source_of(job)
+    with mysqlutil.connect(source) as conn:
+        v = mysqlutil.fetch_value(
+            conn,
+            f"SELECT COUNT(*) FROM `{job.table}` "
+            f"WHERE {_range_predicate(job, from_day, to_day)}",
+        )
+    return int(v or 0)
+
+
+def _day_sql(job: JobConfig, day: date) -> str:
     return (
-        f"SELECT * FROM `{job.table}` WHERE {pred_lo} AND {pred_hi} "
+        f"SELECT * FROM `{job.table}` WHERE {_range_predicate(job, day, day)} "
         f"ORDER BY `{job.cursor_column}`"
     )
 
@@ -114,23 +141,33 @@ def run_backfill(
     on_progress: Callable[[dict], None] | None = None,
 ) -> BackfillResult:
     if from_day > to_day:
-        raise ValueError("--from 必须不晚于 --to")
+        raise ValueError("--from must not be later than --to")
     started = time.monotonic()
     result = BackfillResult(job=job.name)
     day = from_day
     total_days = (to_day - from_day).days + 1
+    total_rows = count_rows_between(config, job, from_day, to_day) if on_progress else 0
+    processed_rows = 0  # 已写入 + 已跳过（skip 天按线上行数计），用于进度与 ETA
     while day <= to_day:
         day_result = backfill_day(config, job, day)
         result.days.append(day_result)
         result.rows += day_result.rows
         result.bytes += day_result.bytes
         if on_progress:
+            if day_result.status == "skip":
+                processed_rows += count_rows_between(config, job, day, day)
+            else:
+                processed_rows += day_result.rows
             on_progress(
                 {
                     "days_done": len(result.days),
                     "days_total": total_days,
                     "rows": result.rows,
+                    "processed_rows": processed_rows,
+                    "total_rows": total_rows,
                     "current_day": day.isoformat(),
+                    "current_status": day_result.status,
+                    "elapsed_seconds": time.monotonic() - started,
                 }
             )
         day = day + timedelta(days=1)

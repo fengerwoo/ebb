@@ -3,7 +3,7 @@
 from datetime import timedelta
 
 from ebb import naming
-from ebb.backfill import run_backfill
+from ebb.backfill import earliest_day, run_backfill
 from ebb.export import get_watermark, run_export
 from ebb.s3util import S3Store
 
@@ -68,3 +68,13 @@ def test_backfill_then_incremental(mysql_conn, uniq):
     assert result.watermark_before == 20
     assert result.rows == 7
     assert result.watermark_after == 27
+
+
+def test_earliest_day(mysql_conn, uniq):
+    """CLI 缺省 --from 的依据：线上最早数据所在天（job 时区）。"""
+    table, prefix, config, job = _setup(mysql_conn, uniq)
+    assert earliest_day(config, job) is None  # 空表
+
+    d3, d1 = days_ago(3), days_ago(1)
+    insert_rows(mysql_conn, table, [d1] * 5 + [d3] * 5)  # 乱序插入也取最早
+    assert earliest_day(config, job) == d3.date()

@@ -58,6 +58,23 @@ def run_compact(
         log("compact", job=job.name, dt=dt, status="skip", source_files=len(files))
         return result
 
+    # 单个 inc 文件无需合并，直接改名为 data（纯服务端 CopyObject，零数据传输）
+    if len(files) == 1 and inc_files:
+        f = files[0]
+        target = naming.data_key(job.prefix, dt, f.from_id, f.to_id)
+        store.rename(f.key, target)
+        result.status = "ok"
+        result.bytes = store.head_size(target)
+        result.target_key = target
+        result.removed_keys = [f.key]
+        result.duration_seconds = round(time.monotonic() - started, 3)
+        log(
+            "compact", job=job.name, dt=dt, status="renamed",
+            source_files=1, bytes=result.bytes, target=target,
+            duration_seconds=result.duration_seconds,
+        )
+        return result
+
     from_id = min(f.from_id for f in files)
     to_id = max(f.to_id for f in files)
     target = naming.data_key(job.prefix, dt, from_id, to_id)

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date, datetime
+import time
+from datetime import date, datetime, timedelta
 
 import click
 
@@ -17,7 +18,7 @@ def _load(ctx: click.Context) -> Config:
         return load_config(path)
     except FileNotFoundError:
         raise click.ClickException(
-            f"配置文件不存在: {resolve_config_path(path)}（用 -c 或 EBB_CONFIG 指定）"
+            f"config file not found: {resolve_config_path(path)} (use -c or EBB_CONFIG)"
         )
 
 
@@ -38,26 +39,58 @@ def _fmt_eta(seconds: float | None) -> str:
     if seconds is None:
         return "-"
     if seconds < 60:
-        return f"{seconds:.0f} 秒"
+        return f"{seconds:.0f}s"
     if seconds < 3600:
-        return f"{seconds / 60:.1f} 分钟"
-    return f"{seconds / 3600:.1f} 小时"
+        return f"{seconds / 60:.1f} min"
+    return f"{seconds / 3600:.1f} h"
+
+
+class _Throttle:
+    """进度打印节流：避免小批量高频刷屏。"""
+
+    def __init__(self, interval_seconds: float = 1.0) -> None:
+        self._interval = interval_seconds
+        self._last = 0.0
+
+    def ready(self) -> bool:
+        now = time.monotonic()
+        if now - self._last >= self._interval:
+            self._last = now
+            return True
+        return False
+
+
+def _rows_progress(done: int, total: int, elapsed_seconds: float) -> str:
+    """`done/total rows (pct%), rate rows/s, ETA xx` 形式的进度片段。"""
+    pct = f"{done / total * 100:.1f}%" if total > 0 else "-"
+    rate = done / elapsed_seconds if elapsed_seconds > 0 and done > 0 else None
+    if total > 0 and done >= total:
+        eta = 0.0
+    elif rate and total > done:
+        eta = (total - done) / rate
+    else:
+        eta = None
+    rate_s = f"{rate:,.0f} rows/s" if rate else "-"
+    return (
+        f"{_fmt_int(done)}/{_fmt_int(total)} rows ({pct}), "
+        f"{rate_s}, ETA {_fmt_eta(eta)}"
+    )
 
 
 @click.group()
-@click.option("-c", "--config", "config_path", default=None, help="配置文件路径")
+@click.option("-c", "--config", "config_path", default=None, help="config file path")
 @click.pass_context
 def main(ctx: click.Context, config_path: str | None) -> None:
-    """ebb：MySQL 追加型表 → 对象存储 Parquet 归档，DuckDB 随时可查。"""
+    """ebb: archive append-only MySQL tables to object storage as Parquet, query anytime with DuckDB."""
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config_path
 
 
 @main.command()
-@click.option("--job", "job_name", default=None, help="只检查指定 job")
+@click.option("--job", "job_name", default=None, help="check the given job only")
 @click.pass_context
 def check(ctx: click.Context, job_name: str | None) -> None:
-    """体检：MySQL 连接、表结构、对象存储读写、DuckDB 扩展。"""
+    """Preflight checks: MySQL connection, table schema, storage read/write, DuckDB extensions."""
     from .checks import check_job
 
     config = _load(ctx)
@@ -73,14 +106,17 @@ def check(ctx: click.Context, job_name: str | None) -> None:
 
 
 @main.command()
-@click.option("--job", "job_name", default=None, help="只看指定 job")
+@click.option("--job", "job_name", default=None, help="show the given job only")
 @click.pass_context
 def status(ctx: click.Context, job_name: str | None) -> None:
-    """水位、线上最大 id、落后行数与追平估算（不依赖 serve）。"""
+    """Watermark, online max id, lag and catch-up estimate (does not require serve)."""
     from .status import job_status
 
     config = _load(ctx)
-    header = f"{'JOB':<20} {'水位':>14} {'线上最大ID':>14} {'落后行数':>12} {'文件数':>8}  {'速率(行/秒)':>12}  追平预计"
+    header = (
+        f"{'JOB':<20} {'WATERMARK':>14} {'MAX_ID':>14} {'LAG_ROWS':>12} "
+        f"{'FILES':>8}  {'RATE(rows/s)':>12}  ETA"
+    )
     click.echo(header)
     for job in _select_jobs(config, job_name):
         s = job_status(config, job)
@@ -94,7 +130,7 @@ def status(ctx: click.Context, job_name: str | None) -> None:
 @main.command()
 @click.pass_context
 def ps(ctx: click.Context) -> None:
-    """实时执行状态（读取 serve 进程的管理端点）。"""
+    """Live execution state (reads the serve process admin endpoint)."""
     import httpx
 
     config = _load(ctx)
@@ -103,10 +139,10 @@ def ps(ctx: click.Context) -> None:
     try:
         data = httpx.get(url, timeout=5).json()
     except Exception:
-        raise click.ClickException("serve 进程未运行（管理端点不可达）")
+        raise click.ClickException("serve is not running (admin endpoint unreachable)")
     entries = data.get("jobs", [])
     if not entries:
-        click.echo("serve 在运行，但还没有任何任务执行记录")
+        click.echo("serve is running, but no job executions have been recorded yet")
         return
     click.echo(f"{'JOB':<20} {'KIND':<8} {'STATE':<8} {'PROGRESS / LAST':<50} NEXT")
     for e in sorted(entries, key=lambda x: (x["job"], x["kind"])):
@@ -125,11 +161,11 @@ def ps(ctx: click.Context) -> None:
 
 @main.command()
 @click.option("--job", "job_name", required=True)
-@click.option("--once", is_flag=True, default=True, help="跑一轮（当前仅支持单轮）")
-@click.option("--dry-run", is_flag=True, default=False, help="只算不写")
+@click.option("--once", is_flag=True, default=True, help="run one round (only single round supported for now)")
+@click.option("--dry-run", is_flag=True, default=False, help="compute only, write nothing")
 @click.pass_context
 def run(ctx: click.Context, job_name: str, once: bool, dry_run: bool) -> None:  # noqa: ARG001
-    """手动跑一轮增量导出。"""
+    """Run one round of incremental export manually."""
     from .export import run_export
 
     config = _load(ctx)
@@ -137,50 +173,66 @@ def run(ctx: click.Context, job_name: str, once: bool, dry_run: bool) -> None:  
     result = run_export(config, job, dry_run=dry_run)
     if dry_run:
         click.echo(
-            f"[dry-run] 本轮将导出 {_fmt_int(result.rows)} 行 "
-            f"(水位 {_fmt_int(result.watermark_before)} → {_fmt_int(result.watermark_after)})，"
-            f"当前落后 {_fmt_int(result.lag_rows)} 行"
+            f"[dry-run] would export {_fmt_int(result.rows)} rows "
+            f"(watermark {_fmt_int(result.watermark_before)} -> {_fmt_int(result.watermark_after)}), "
+            f"current lag {_fmt_int(result.lag_rows)} rows"
         )
     else:
         click.echo(
-            f"导出完成: {result.status}, {_fmt_int(result.rows)} 行, {result.bytes} 字节, "
-            f"{len(result.files)} 个文件, 水位 {_fmt_int(result.watermark_after)}, "
-            f"落后 {_fmt_int(result.lag_rows)} 行, 耗时 {result.duration_seconds}s"
+            f"export done: {result.status}, {_fmt_int(result.rows)} rows, {result.bytes} bytes, "
+            f"{len(result.files)} files, watermark {_fmt_int(result.watermark_after)}, "
+            f"lag {_fmt_int(result.lag_rows)} rows, took {result.duration_seconds}s"
         )
 
 
 @main.command()
 @click.option("--job", "job_name", required=True)
-@click.option("--from", "from_str", required=True, help="起始日期 YYYY-MM-DD")
-@click.option("--to", "to_str", required=True, help="结束日期 YYYY-MM-DD（含）")
+@click.option("--from", "from_str", default=None, help="start date YYYY-MM-DD; defaults to the earliest online day")
+@click.option("--to", "to_str", default=None, help="end date YYYY-MM-DD (inclusive); defaults to yesterday (job timezone)")
 @click.pass_context
-def backfill(ctx: click.Context, job_name: str, from_str: str, to_str: str) -> None:
-    """存量回填，按天切片。"""
-    from .backfill import run_backfill
+def backfill(ctx: click.Context, job_name: str, from_str: str | None, to_str: str | None) -> None:
+    """Backfill history day by day. Default range is earliest online day ~ yesterday; today is left to incremental export."""
+    from .backfill import earliest_day, run_backfill
 
     config = _load(ctx)
     job = _select_jobs(config, job_name)[0]
-    result = run_backfill(
-        config,
-        job,
-        date.fromisoformat(from_str),
-        date.fromisoformat(to_str),
-        on_progress=lambda p: click.echo(
-            f"  [{p['days_done']}/{p['days_total']}] {p['current_day']} 累计 {_fmt_int(p['rows'])} 行"
-        ),
+    if from_str is None:
+        from_day = earliest_day(config, job)
+        if from_day is None:
+            click.echo("table is empty, nothing to backfill")
+            return
+    else:
+        from_day = date.fromisoformat(from_str)
+    to_day = (
+        date.fromisoformat(to_str)
+        if to_str is not None
+        else datetime.now(tz=job.tzinfo).date() - timedelta(days=1)
     )
+    if from_day > to_day:
+        click.echo(f"empty backfill range ({from_day} > {to_day}), nothing to do")
+        return
+    click.echo(f"backfill range: {from_day} ~ {to_day} (inclusive)")
+
+    def on_progress(p: dict) -> None:
+        mark = " (skip)" if p.get("current_status") == "skip" else ""
+        click.echo(
+            f"  [{p['days_done']}/{p['days_total']}] {p['current_day']}{mark}  "
+            + _rows_progress(p["processed_rows"], p["total_rows"], p["elapsed_seconds"])
+        )
+
+    result = run_backfill(config, job, from_day, to_day, on_progress=on_progress)
     click.echo(
-        f"回填完成: {_fmt_int(result.rows)} 行, {result.bytes} 字节, "
-        f"{len(result.days)} 天, 耗时 {result.duration_seconds}s"
+        f"backfill done: {_fmt_int(result.rows)} rows, {result.bytes} bytes, "
+        f"{len(result.days)} days, took {result.duration_seconds}s"
     )
 
 
 @main.command("compact")
 @click.option("--job", "job_name", required=True)
-@click.option("--date", "date_str", required=True, help="要合并的分区日期 YYYY-MM-DD")
+@click.option("--date", "date_str", required=True, help="partition date to compact, YYYY-MM-DD")
 @click.pass_context
 def compact_cmd(ctx: click.Context, job_name: str, date_str: str) -> None:
-    """手动触发某天合并。"""
+    """Compact one day's partition manually."""
     from .compact import run_compact
 
     config = _load(ctx)
@@ -188,46 +240,67 @@ def compact_cmd(ctx: click.Context, job_name: str, date_str: str) -> None:
     date.fromisoformat(date_str)  # 校验格式
     result = run_compact(config, job, date_str)
     if result.status == "skip":
-        click.echo(f"无需合并（{result.source_files} 个文件）")
+        click.echo(f"nothing to compact ({result.source_files} files)")
     else:
         click.echo(
-            f"合并完成: {result.source_files} 个文件 → {result.target_key} "
-            f"({_fmt_int(result.rows)} 行, {result.bytes} 字节)"
+            f"compact done: {result.source_files} files -> {result.target_key} "
+            f"({_fmt_int(result.rows)} rows, {result.bytes} bytes)"
         )
 
 
 @main.command("purge")
 @click.option("--job", "job_name", required=True)
-@click.option("--dry-run", is_flag=True, default=False, help="只预览将删除的区间")
+@click.option("--dry-run", is_flag=True, default=False, help="preview the deletable range only")
 @click.pass_context
 def purge_cmd(ctx: click.Context, job_name: str, dry_run: bool) -> None:
-    """校验后分批删除线上已归档的过期数据。"""
+    """Verify archived data, then delete expired online rows in batches."""
     from .purge import run_purge
 
     config = _load(ctx)
     job = _select_jobs(config, job_name)[0]
-    result = run_purge(config, job, dry_run=dry_run)
+    throttle = _Throttle()
+
+    def on_progress(p: dict) -> None:
+        stage = p.get("stage")
+        if stage == "plan":
+            click.echo(
+                f"eligible: {_fmt_int(p['eligible_rows'])} rows "
+                f"(id <= {_fmt_int(p['bound_id'])}, watermark {_fmt_int(p['watermark'])})"
+            )
+        elif stage == "verify":
+            click.echo(
+                f"verifying archived data for id [{_fmt_int(p['from_id'])}, {_fmt_int(p['to_id'])}] "
+                f"(row count + id sum) ..."
+            )
+        elif stage == "delete":
+            if p["deleted_rows"] >= p["eligible_rows"] or throttle.ready():
+                click.echo(
+                    f"  deleted {p['batches']} batches, "
+                    + _rows_progress(p["deleted_rows"], p["eligible_rows"], p["elapsed_seconds"])
+                )
+
+    result = run_purge(config, job, dry_run=dry_run, on_progress=None if dry_run else on_progress)
     if result.status == "empty":
-        click.echo("没有可删除的数据")
+        click.echo("nothing to purge")
     elif result.status == "dry-run":
         click.echo(
-            f"[dry-run] 可删 id <= {_fmt_int(result.bound_id)}，"
-            f"共 {_fmt_int(result.eligible_rows)} 行（水位 {_fmt_int(result.watermark)}）"
+            f"[dry-run] deletable id <= {_fmt_int(result.bound_id)}, "
+            f"{_fmt_int(result.eligible_rows)} rows total (watermark {_fmt_int(result.watermark)})"
         )
     elif result.status == "verify-failed":
-        click.echo(f"校验失败，未删除: {result.detail}", err=True)
+        click.echo(f"verify failed, nothing deleted: {result.detail}", err=True)
         sys.exit(1)
     else:
         click.echo(
-            f"删除完成: {_fmt_int(result.deleted_rows)} 行 / {result.batches} 批, "
-            f"耗时 {result.duration_seconds}s"
+            f"purge done: {_fmt_int(result.deleted_rows)} rows / {result.batches} batches, "
+            f"took {result.duration_seconds}s"
         )
 
 
 @main.command()
 @click.pass_context
 def serve(ctx: click.Context) -> None:
-    """常驻模式：调度器 + 管理端点 + 可选查询 API（Docker 入口）。"""
+    """Long-running mode: scheduler + admin endpoint + optional query API (Docker entrypoint)."""
     from .scheduler import serve as serve_loop
 
     serve_loop(_load(ctx))
@@ -235,10 +308,10 @@ def serve(ctx: click.Context) -> None:
 
 @main.command()
 @click.argument("sql")
-@click.option("--max-rows", default=1000, show_default=True, help="最多显示行数")
+@click.option("--max-rows", default=1000, show_default=True, help="max rows to display")
 @click.pass_context
 def query(ctx: click.Context, sql: str, max_rows: int) -> None:
-    """本地直查对象存储上的归档数据（每个 job 的表名即视图名）。"""
+    """Query archived data on object storage directly (each job's table name is a view name)."""
     from .queryservice import run_query
 
     config = _load(ctx)
@@ -251,8 +324,8 @@ def query(ctx: click.Context, sql: str, max_rows: int) -> None:
     click.echo("-+-".join("-" * w for w in widths))
     for row in result.rows:
         click.echo(" | ".join(str(v).ljust(w) for v, w in zip(row, widths)))
-    suffix = "（已截断）" if result.truncated else ""
-    click.echo(f"\n{result.row_count} 行{suffix}")
+    suffix = " (truncated)" if result.truncated else ""
+    click.echo(f"\n{result.row_count} rows{suffix}")
 
 
 if __name__ == "__main__":

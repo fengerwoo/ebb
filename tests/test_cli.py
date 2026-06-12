@@ -53,10 +53,38 @@ def _write_config(tmp_path, table: str, prefix: str) -> str:
     return str(path)
 
 
+def test_cli_backfill_default_range(tmp_path, mysql_conn, uniq):
+    """缺省 --from/--to：回填「线上最早一天 ~ 昨天」，今天留给增量。"""
+    table = f"logs_{uniq}"
+    prefix = f"t/{uniq}"
+    create_log_table(mysql_conn, table)
+    cfg = _write_config(tmp_path, table, prefix)
+    runner = CliRunner()
+
+    # 空表：直接提示，不报错
+    r = runner.invoke(main, ["-c", cfg, "backfill", "--job", "demo"])
+    assert r.exit_code == 0, r.output
+    assert "table is empty" in r.output
+
+    # 2 天前 8 行、1 天前 6 行、今天 3 行 → 只回填前两天
+    insert_rows(mysql_conn, table, [days_ago(2)] * 8 + [days_ago(1)] * 6 + [hours_ago(0.1)] * 3)
+    r = runner.invoke(main, ["-c", cfg, "backfill", "--job", "demo"])
+    assert r.exit_code == 0, r.output
+    assert f"{days_ago(2).date()} ~ {days_ago(1).date()}" in r.output
+    assert "14 rows" in r.output
+
+    # 只剩今天的数据未归档 → 缺省区间为空时友好提示
+    r = runner.invoke(main, ["-c", cfg, "run", "--job", "demo", "--once"])
+    assert r.exit_code == 0, r.output
+    r = runner.invoke(main, ["-c", cfg, "backfill", "--job", "demo", "--from", days_ago(0).date().isoformat()])
+    assert r.exit_code == 0, r.output
+    assert "nothing to do" in r.output
+
+
 def test_cli_missing_config():
     result = CliRunner().invoke(main, ["-c", "/nonexistent/config.yml", "status"])
     assert result.exit_code != 0
-    assert "配置文件不存在" in result.output
+    assert "config file not found" in result.output
 
 
 def test_cli_full_flow(tmp_path, mysql_conn, uniq):
@@ -81,7 +109,7 @@ def test_cli_full_flow(tmp_path, mysql_conn, uniq):
     # 真跑
     r = runner.invoke(main, ["-c", cfg, "run", "--job", "demo", "--once"])
     assert r.exit_code == 0, r.output
-    assert "导出完成" in r.output
+    assert "export done" in r.output
 
     # status
     r = runner.invoke(main, ["-c", cfg, "status"])
@@ -99,7 +127,7 @@ def test_cli_full_flow(tmp_path, mysql_conn, uniq):
     assert "20" in r.output
     r = runner.invoke(main, ["-c", cfg, "purge", "--job", "demo"])
     assert r.exit_code == 0, r.output
-    assert "删除完成" in r.output
+    assert "purge done" in r.output
 
     # query
     r = runner.invoke(
