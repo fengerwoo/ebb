@@ -1,0 +1,10 @@
+services:
+  ebb:
+    build: .
+    image: ebb:latest
+    container_name: ebb
+    restart: unless-stopped
+    volumes:
+      - ./config.yml:/etc/ebb/config.yml:ro
+    ports:
+      - "8080:8080"   # 查询 API；不对外提供查询可去掉

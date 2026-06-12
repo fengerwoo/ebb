@@ -1,0 +1,85 @@
+# ebb 配置示例：复制为 config.yml 后按需修改
+# 默认读取 /etc/ebb/config.yml，可用环境变量 EBB_CONFIG 或 `ebb -c` 覆盖
+
+# MySQL 数据源（可配多个）
+sources:
+  prod-db:
+    dsn: "mysql://user:password@mysql.example.com:3306/appdb"
+
+# S3 兼容对象存储（可配多个）：AWS S3 / 阿里云 OSS / 腾讯云 COS / MinIO
+storages:
+  # 阿里云 OSS
+  my-oss:
+    type: s3
+    endpoint: "oss-cn-hangzhou.aliyuncs.com"   # 不要带 bucket 前缀
+    bucket: my-archive-bucket
+    access_key_id: "LTAI..."
+    secret_access_key: "..."
+    region: "cn-hangzhou"
+    url_style: vhost          # OSS / COS 用 vhost
+    use_ssl: true
+
+  # 腾讯云 COS（注意 region 写在 endpoint 里）
+  # my-cos:
+  #   type: s3
+  #   endpoint: "cos.ap-guangzhou.myqcloud.com"
+  #   bucket: my-archive-1250000000        # COS bucket 名带 appid 后缀
+  #   access_key_id: "AKID..."
+  #   secret_access_key: "..."
+  #   region: "ap-guangzhou"
+  #   url_style: vhost
+
+  # AWS S3（endpoint 留空走官方端点）
+  # my-s3:
+  #   type: s3
+  #   bucket: my-archive-bucket
+  #   access_key_id: "AKIA..."
+  #   secret_access_key: "..."
+  #   region: "us-east-1"
+
+  # MinIO / 自建（path 风格 + 可关 SSL）
+  # my-minio:
+  #   type: s3
+  #   endpoint: "http://minio.internal:9000"
+  #   bucket: archive
+  #   access_key_id: "..."
+  #   secret_access_key: "..."
+  #   url_style: path
+  #   use_ssl: false
+
+# job = 一张表的完整管道（增量导出 / 每日合并 / 校验删除，水位互相独立）
+jobs:
+  - name: app-logs
+    source: prod-db
+    table: logs
+    cursor_column: id              # 自增整数主键（游标）
+    time_column: created_at        # 用于推导日期分区的时间字段
+    time_column_type: unix_s       # unix_s / unix_ms / unix_us / datetime / timestamp
+    timezone: Asia/Shanghai        # int 时间戳转日期、无时区 datetime 解释时使用
+    storage: my-oss
+    prefix: archive/app-logs       # 对象存储内的根前缀，分区目录直接挂在其下
+    schedule:
+      interval_seconds: 300        # 增量导出周期（秒）
+      compact_at: "03:00"          # 每日合并时刻（job 时区），合并后顺带 purge
+    batch:
+      export_rows: 500000          # 单轮导出行数上限，追不平下一轮继续
+      delete_rows: 5000            # 删除批大小
+      delete_sleep_ms: 200         # 删除批间隔（毫秒）
+      safety_lag_seconds: 5        # 只导出早于 now-N秒 的行，规避自增 id 提交乱序漏读
+    retention:
+      online_retain_seconds: 86400 # 线上保留时长（秒），86400 = 1 天
+      verify_before_delete: true   # 删除前对比 MySQL 与 Parquet 行数 + id 和
+
+# HTTP 查询 API（可选）。POST /query {"sql": "SELECT ..."}，
+# Header: Authorization: Bearer <key>。每个 job 自动注册同名视图（默认取表名）。
+query_api:
+  enabled: false
+  listen: "0.0.0.0:8080"
+  api_keys:
+    - "sk-change-me"
+  max_rows: 100000
+  timeout_seconds: 60
+
+# 本地管理端点（ebb ps 读取），只监听回环地址，一般无需修改
+admin:
+  listen: "127.0.0.1:8081"

@@ -1,0 +1,30 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ebb-test-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ebbtest
+      MYSQL_DATABASE: ebbtest
+    ports:
+      - "33061:3306"
+    command: --default-time-zone='+08:00'
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pebbtest"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  minio:
+    image: minio/minio:latest
+    container_name: ebb-test-minio
+    environment:
+      MINIO_ROOT_USER: ebbtest
+      MINIO_ROOT_PASSWORD: ebbtest123
+    ports:
+      - "39001:9000"
+    command: server /data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 2s
+      retries: 60

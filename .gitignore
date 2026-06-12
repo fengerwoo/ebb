@@ -1,0 +1,27 @@
+# 私有文档与配置
+docs/
+config.yml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# 测试与工具
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
+
+# Claude
+.claude/

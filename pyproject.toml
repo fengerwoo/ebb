@@ -1,0 +1,40 @@
+[project]
+name = "ebb"
+version = "0.1.0"
+description = "MySQL append-only tables archived to S3-compatible storage as Parquet, queryable via DuckDB"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "duckdb>=1.1",
+    "pydantic>=2.7",
+    "PyYAML>=6.0",
+    "APScheduler>=3.10,<4",
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+    "boto3>=1.34",
+    "PyMySQL>=1.1",
+    "cryptography>=42",
+    "click>=8.1",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.3",
+]
+
+[project.scripts]
+ebb = "ebb.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ebb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 300
