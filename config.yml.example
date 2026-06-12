@@ -59,6 +59,7 @@ jobs:
     storage: my-oss
     prefix: archive/app-logs       # 对象存储内的根前缀，分区目录直接挂在其下
     schedule:
+      enabled: true                # 是否参与 serve 调度（默认 true）；false 时仅可手动 run/compact/purge
       interval_seconds: 300        # 增量导出周期（秒）
       compact_at: "03:00"          # 每日合并时刻（job 时区），合并后顺带 purge
     batch:

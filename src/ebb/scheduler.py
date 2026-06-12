@@ -93,7 +93,11 @@ def serve(config: Config, stop_event: threading.Event | None = None) -> None:
     registry = Registry()
     scheduler = BackgroundScheduler()
 
+    scheduled_jobs = [j for j in config.jobs if j.schedule.enabled]
     for job in config.jobs:
+        if not job.schedule.enabled:
+            log("serve", status="schedule_disabled", job=job.name)
+            continue
         scheduler.add_job(
             _run_export_job,
             IntervalTrigger(seconds=job.schedule.interval_seconds),
@@ -114,7 +118,7 @@ def serve(config: Config, stop_event: threading.Event | None = None) -> None:
         )
 
     def _refresh_next_runs() -> None:
-        for job in config.jobs:
+        for job in scheduled_jobs:
             for kind, job_id in (("export", f"export:{job.name}"), ("compact", f"daily:{job.name}")):
                 aps_job = scheduler.get_job(job_id)
                 registry.set_next_run(
@@ -137,7 +141,7 @@ def serve(config: Config, stop_event: threading.Event | None = None) -> None:
     log(
         "serve",
         status="started",
-        jobs=[j.name for j in config.jobs],
+        jobs=[j.name for j in scheduled_jobs],
         admin=config.admin.listen,
         query_api=config.query_api.listen if config.query_api.enabled else None,
     )

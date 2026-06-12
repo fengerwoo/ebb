@@ -77,6 +77,7 @@ class StorageConfig(BaseModel):
 
 
 class ScheduleConfig(BaseModel):
+    enabled: bool = True  # 是否参与 serve 调度；关闭后仅可手动执行（便于测试）
     interval_seconds: int = Field(default=300, ge=1)  # 增量导出周期
     compact_at: str = "03:00"  # 每日合并时刻（job 时区），合并后顺带 purge
 
