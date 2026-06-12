@@ -156,7 +156,7 @@ class JobConfig(BaseModel):
 
 class QueryApiConfig(BaseModel):
     enabled: bool = False
-    listen: str = "0.0.0.0:8080"
+    listen: str = "0.0.0.0:18761"
     api_keys: list[str] = []
     max_rows: int = Field(default=100_000, ge=1)
     timeout_seconds: int = Field(default=60, ge=1)
@@ -176,7 +176,7 @@ class QueryApiConfig(BaseModel):
 class AdminConfig(BaseModel):
     """serve 进程的本地管理端点（ebb ps 读取），只监听回环地址。"""
 
-    listen: str = "127.0.0.1:8081"
+    listen: str = "127.0.0.1:18762"
 
     @property
     def host_port(self) -> tuple[str, int]:

@@ -7,4 +7,4 @@ services:
     volumes:
       - ./config.yml:/etc/ebb/config.yml:ro
     ports:
-      - "8080:8080"   # 查询 API；不对外提供查询可去掉
+      - "18761:18761" # 查询 API；不对外提供查询可去掉

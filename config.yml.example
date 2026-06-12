@@ -74,7 +74,7 @@ jobs:
 # Header: Authorization: Bearer <key>。每个 job 自动注册同名视图（默认取表名）。
 query_api:
   enabled: false
-  listen: "0.0.0.0:8080"
+  listen: "0.0.0.0:18761"
   api_keys:
     - "sk-change-me"
   max_rows: 100000
@@ -82,4 +82,4 @@ query_api:
 
 # 本地管理端点（ebb ps 读取），只监听回环地址，一般无需修改
 admin:
-  listen: "127.0.0.1:8081"
+  listen: "127.0.0.1:18762"
