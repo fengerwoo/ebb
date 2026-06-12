@@ -1,7 +1,8 @@
 services:
   ebb:
-    build: .
-    image: ebb:latest
+    image: ghcr.io/fengerwoo/ebb:latest
+    # 从源码构建时取消下一行注释，并用 docker compose up -d --build
+    # build: .
     container_name: ebb
     restart: unless-stopped
     volumes:

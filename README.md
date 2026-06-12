@@ -19,12 +19,50 @@
 - 一个时间字段用于推导日期分区，类型可配：`unix_s` / `unix_ms` / `unix_us` / `datetime` / `timestamp`；
 - 表为追加型：增量基于自增 id 游标，不感知 UPDATE / DELETE。
 
-## 快速开始
+## 安装与快速开始
+
+推荐直接使用 GHCR 镜像（多架构：amd64 / arm64），无需 Python 环境：
 
 ```bash
-cp config.yml.example config.yml   # 按注释填好数据源、对象存储与 job
+# 1. 拉取镜像
+docker pull ghcr.io/fengerwoo/ebb:latest
+
+# 2. 导出样例配置，按注释填好数据源、对象存储与 job
+docker run --rm --entrypoint cat ghcr.io/fengerwoo/ebb /app/config.yml.example > config.yml
+vim config.yml
+
+# 3. 体检：验证 MySQL / 对象存储连通性与表结构
+docker run --rm -v ./config.yml:/etc/ebb/config.yml:ro ghcr.io/fengerwoo/ebb check
+```
+
+体检通过后，写一份 `docker-compose.yml` 常驻运行：
+
+```yaml
+services:
+  ebb:
+    image: ghcr.io/fengerwoo/ebb:latest
+    container_name: ebb
+    restart: unless-stopped
+    volumes:
+      - ./config.yml:/etc/ebb/config.yml:ro
+    ports:
+      - "18761:18761"   # HTTP 查询 API；未启用或不对外可删掉
+```
+
+```bash
 docker compose up -d               # 入口即 ebb serve
 docker logs -f ebb                 # 结构化 JSON 日志
+```
+
+> 提示：MySQL 跑在宿主机时，容器内请用 `host.docker.internal`（Mac/Windows）或 host 网络模式（Linux）访问；修改 config.yml 后 `docker restart ebb` 生效。
+
+也可以从源码构建：
+
+```bash
+git clone https://github.com/fengerwoo/ebb.git && cd ebb
+cp config.yml.example config.yml   # 按注释填好
+# docker-compose.yml 中取消 build: . 的注释
+docker compose up -d --build
 ```
 
 日常操作：
