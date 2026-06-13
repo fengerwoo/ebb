@@ -8,7 +8,8 @@
 - unix_s / unix_ms / unix_us：整数 epoch，绝对时刻，用 job 时区转日期；
 - datetime：无时区墙钟，按 job 时区解释，日期直接取墙钟日期；
 - timestamp：MySQL 侧按 UTC 瞬间比较（FROM_UNIXTIME，与会话时区无关）；
-  拉取值是会话时区渲染的墙钟，分区日期直接取该墙钟日期。
+  拉取值是会话时区渲染的墙钟、不可靠，分区日期由下推时附带的
+  UNIX_TIMESTAMP 辅助列（绝对时刻）按 job 时区推导。
 """
 
 from __future__ import annotations
@@ -18,6 +19,29 @@ from datetime import date, datetime
 from .config import JobConfig
 
 _FACTOR = {"unix_s": 1, "unix_ms": 1_000, "unix_us": 1_000_000}
+
+# timestamp 列下推时附带的辅助列名：UNIX_TIMESTAMP(time_col) 的绝对时刻。
+# 与 __dt 同为内部保留名，check 阶段校验业务表不得占用。
+EPOCH_COLUMN = "__ebb_ts"
+
+
+def mysql_select_clause(job: JobConfig) -> str:
+    """下推到 MySQL 的 SELECT 列清单。
+
+    timestamp 列附带 UNIX_TIMESTAMP 辅助列：拉取的 TIMESTAMP 值是会话时区
+    渲染的墙钟，会话时区与 job 时区不一致时直接取墙钟日期会写错分区；
+    epoch 是绝对时刻，与渲染无关。"""
+    if job.time_column_type == "timestamp":
+        return f"*, UNIX_TIMESTAMP(`{job.time_column}`) AS {EPOCH_COLUMN}"
+    return "*"
+
+
+def internal_columns(job: JobConfig) -> list[str]:
+    """写 Parquet 前需要剔除的内部辅助列（__dt 与可能存在的 epoch 列）。"""
+    cols = ["__dt"]
+    if job.time_column_type == "timestamp":
+        cols.append(EPOCH_COLUMN)
+    return cols
 
 
 def mysql_min_time_expr(job: JobConfig) -> str:
@@ -78,5 +102,11 @@ def duckdb_dt_expr(job: JobConfig) -> str:
             f"strftime(CAST(to_timestamp(CAST({col} AS DOUBLE) / {_FACTOR[t]}) "
             f"AS TIMESTAMP), '%Y-%m-%d')"
         )
-    # datetime / timestamp：拉取值即墙钟，直接取日期
+    if t == "timestamp":
+        # 用下推附带的 epoch 辅助列推导：墙钟渲染受 MySQL 会话时区影响，不可靠
+        return (
+            f'strftime(CAST(to_timestamp(CAST("{EPOCH_COLUMN}" AS DOUBLE)) '
+            f"AS TIMESTAMP), '%Y-%m-%d')"
+        )
+    # datetime：无时区墙钟，按 job 时区解释，直接取墙钟日期
     return f"strftime(CAST({col} AS TIMESTAMP), '%Y-%m-%d')"

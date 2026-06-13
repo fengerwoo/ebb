@@ -3,6 +3,13 @@
 安全约束（比认证更重要）：
 - 每次查询一个全新 DuckDB 连接，只挂 httpfs + S3 secret，不挂 MySQL；
 - 仅允许单条 SELECT / WITH 语句（用 DuckDB 解析器判定语句类型）;
+- S3 secret 按 job 建、SCOPE 收窄到 bucket/prefix：查询方即使手写
+  read_parquet('s3://...') 也只能读各 job 归档前缀下的对象，同 bucket
+  的其他路径没有凭据可用；
+- 禁用本地文件系统与 http(s) 直读并锁定配置：SELECT 也能调用
+  read_text/read_csv 等表函数读服务器本地文件（泄露配置里的数据库/存储
+  凭据）或向任意 http 地址发请求（SSRF/数据外带），必须在建好 secret
+  与视图之后 SET disabled_filesystems + lock_configuration；
 - 强制超时（后台线程 interrupt）与返回行数上限；
 - 为每个 job 注册视图，视图名默认取表名（冲突时退化为 job 名），
   查询方可直接 SELECT ... FROM <表名>。
@@ -75,29 +82,34 @@ def run_query(
     max_rows = max_rows or config.query_api.max_rows
     timeout_seconds = timeout_seconds or config.query_api.timeout_seconds
 
-    # 任意一个 job 的 storage 都可能被查询，secret 取第一个 storage；
-    # 多 storage 时为每个 bucket 建独立 SCOPE secret。
     conn = duckdb.connect()
+    # 超时 interrupt 后工作线程仍未退出时置 True：此时不能 close（连接
+    # 仍被另一线程使用，并发关闭可能让整个进程崩溃），留给 GC 随线程回收
+    detached = False
     try:
-        storages = list(config.storages.values())
-        if storages:
+        if config.storages:
             engine._load_extension(conn, "httpfs")
             engine._load_extension(conn, "icu")
-            quote = engine._quote
-            for i, st in enumerate(storages):
-                parts = [
-                    "TYPE s3",
-                    f"KEY_ID {quote(st.access_key_id)}",
-                    f"SECRET {quote(st.secret_access_key)}",
-                    f"URL_STYLE {quote(st.url_style)}",
-                    f"USE_SSL {'true' if st.use_ssl else 'false'}",
-                    f"SCOPE {quote('s3://' + st.bucket)}",
-                ]
-                if st.region:
-                    parts.append(f"REGION {quote(st.region)}")
-                if st.duckdb_endpoint:
-                    parts.append(f"ENDPOINT {quote(st.duckdb_endpoint)}")
-                conn.execute(f"CREATE OR REPLACE SECRET ebb_s3_{i} ({', '.join(parts)})")
+        quote = engine._quote
+        # 每个 job 一个 secret，SCOPE 收窄到 bucket/prefix（DuckDB 按最长
+        # 匹配选 secret）：API key 只解锁各 job 的归档前缀，不解锁整个 bucket。
+        # SCOPE 必须带尾部 /：DuckDB 的 scope 是字符串前缀匹配，不带 / 时
+        # prefix=logs 会连带匹配兄弟前缀 logs2/... 造成越权读其他 job 的对象。
+        for i, job in enumerate(config.jobs):
+            st = config.storage_of(job)
+            parts = [
+                "TYPE s3",
+                f"KEY_ID {quote(st.access_key_id)}",
+                f"SECRET {quote(st.secret_access_key)}",
+                f"URL_STYLE {quote(st.url_style)}",
+                f"USE_SSL {'true' if st.use_ssl else 'false'}",
+                f"SCOPE {quote(f's3://{st.bucket}/{job.prefix}/')}",
+            ]
+            if st.region:
+                parts.append(f"REGION {quote(st.region)}")
+            if st.duckdb_endpoint:
+                parts.append(f"ENDPOINT {quote(st.duckdb_endpoint)}")
+            conn.execute(f"CREATE OR REPLACE SECRET ebb_s3_{i} ({', '.join(parts)})")
 
         jobs_by_name = {j.name: j for j in config.jobs}
         for view, job_name in view_names(config).items():
@@ -112,6 +124,13 @@ def run_query(
                 # 该 job 还没有任何归档文件（glob 绑定失败）：跳过其视图，
                 # 不影响其他 job 的查询
                 continue
+
+        # 沙箱收口：扩展加载、secret、视图都已就绪，禁用本地文件系统
+        # （read_text('/etc/...') 等也是 SELECT，语句类型校验拦不住）与
+        # http(s) 直读（SSRF/外带；S3FileSystem 独立注册，s3:// 不受影响），
+        # 再锁定配置防止查询把限制改回去。顺序不能动：LOAD 需要读本地磁盘。
+        conn.execute("SET disabled_filesystems = 'LocalFileSystem,HTTPFileSystem'")
+        conn.execute("SET lock_configuration = true")
 
         holder: dict = {}
 
@@ -130,6 +149,8 @@ def run_query(
         if worker.is_alive():
             conn.interrupt()
             worker.join(5)
+            if worker.is_alive():
+                detached = True
             raise QueryTimeout(f"查询超时（>{timeout_seconds}s）")
         if "error" in holder:
             raise holder["error"]
@@ -145,4 +166,5 @@ def run_query(
             truncated=truncated,
         )
     finally:
-        conn.close()
+        if not detached:
+            conn.close()

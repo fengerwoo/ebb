@@ -8,6 +8,9 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
+
 import duckdb
 
 from .config import SourceConfig, StorageConfig
@@ -33,6 +36,11 @@ def connect(
     timezone: str | None = None,
 ) -> duckdb.DuckDBPyConnection:
     conn = duckdb.connect()
+    # 内存连接默认不落盘，单批数据（尤其 backfill 的一整天）超过内存上限
+    # 会直接 OOM；指定 temp_directory 后超限自动溢写磁盘，变慢但不变错
+    conn.execute(
+        f"SET temp_directory = {_quote(os.path.join(tempfile.gettempdir(), 'ebb-duckdb'))}"
+    )
     _load_extension(conn, "icu")
     if timezone:
         conn.execute(f"SET TimeZone = {_quote(timezone)}")

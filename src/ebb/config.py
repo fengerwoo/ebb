@@ -21,6 +21,14 @@ DEFAULT_CONFIG_PATH = "/etc/ebb/config.yml"
 TimeColumnType = Literal["unix_s", "unix_ms", "unix_us", "datetime", "timestamp"]
 
 
+def _validate_listen(v: str) -> str:
+    """listen 必须是 host:port 形式，配置加载时就报错，而不是启动时 int() 崩溃。"""
+    _, sep, port = v.rpartition(":")
+    if not sep or not port.isdigit() or not 0 <= int(port) <= 65535:
+        raise ValueError(f"listen 必须是 host:port 形式（端口 0-65535）: {v!r}")
+    return v
+
+
 class SourceConfig(BaseModel):
     """一个 MySQL 数据源，DSN 形如 mysql://user:pass@host:3306/dbname。"""
 
@@ -103,7 +111,14 @@ class BatchConfig(BaseModel):
     delete_sleep_ms: int = Field(default=200, ge=0)  # 删除批间隔
     # 只导出「时间早于 now - safety_lag_seconds」的行，规避自增 id 提交乱序的
     # 可见性竞态（id 较小的事务后提交，导致按 id 游标漏数据）。
+    # 注意它只在「时间列 ≈ 提交时间且事务时长 < lag」的假设下成立，
+    # 机制级的保证由 trx_guard 提供；它同时充当 trx_guard 的观察窗口时长。
     safety_lag_seconds: int = Field(default=5, ge=0)
+    # 活跃事务守卫：用「自增计数器 + 活跃写事务观察窗口」推导本轮安全 id 上界，
+    # 机制上杜绝「小 id 事务晚提交被水位跳过」漏归档（含旧时间值晚提交这种
+    # safety_lag 挡不住的情况）。检测到跨窗口写事务时本轮停写、下轮重试。
+    # 需要 PROCESS 权限，游标列必须是 AUTO_INCREMENT；ebb check 会校验。
+    trx_guard: bool = True
 
 
 class RetentionConfig(BaseModel):
@@ -165,6 +180,8 @@ class QueryApiConfig(BaseModel):
     max_rows: int = Field(default=100_000, ge=1)
     timeout_seconds: int = Field(default=60, ge=1)
 
+    _check_listen = field_validator("listen")(_validate_listen)
+
     @property
     def host_port(self) -> tuple[str, int]:
         host, _, port = self.listen.rpartition(":")
@@ -182,6 +199,8 @@ class AdminConfig(BaseModel):
 
     listen: str = "127.0.0.1:18762"
 
+    _check_listen = field_validator("listen")(_validate_listen)
+
     @property
     def host_port(self) -> tuple[str, int]:
         host, _, port = self.listen.rpartition(":")
@@ -198,6 +217,11 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def _check_refs(self) -> "Config":
         names = set()
+        # 水位完全由 prefix 下的文件名重建，两个 job 共用同一个 bucket+prefix
+        # 会互相抬高对方水位、静默跳过未归档数据，必须在配置层拒绝。
+        # 按 endpoint+bucket 判重（而不是 storage 名）：不同 storage 条目
+        # 指向同一个 bucket 时同样冲突。
+        prefix_owner: dict[tuple[str, str, str], str] = {}
         for job in self.jobs:
             if job.name in names:
                 raise ValueError(f"job 名重复: {job.name}")
@@ -206,6 +230,14 @@ class Config(BaseModel):
                 raise ValueError(f"job {job.name} 引用了不存在的 source: {job.source}")
             if job.storage not in self.storages:
                 raise ValueError(f"job {job.name} 引用了不存在的 storage: {job.storage}")
+            st = self.storages[job.storage]
+            key = (st.endpoint, st.bucket, job.prefix)
+            if key in prefix_owner:
+                raise ValueError(
+                    f"job {job.name} 与 {prefix_owner[key]} 在同一 bucket "
+                    f"({st.bucket}) 使用了相同 prefix: {job.prefix}（水位会互相污染）"
+                )
+            prefix_owner[key] = job.name
         return self
 
     def job(self, name: str) -> JobConfig:

@@ -98,8 +98,9 @@ def test_cli_full_flow(tmp_path, mysql_conn, uniq):
     r = runner.invoke(main, ["-c", cfg, "check"])
     assert r.exit_code == 0, r.output
 
-    # 数据：2 天前 20 行（过期可删），1 小时前 10 行
-    insert_rows(mysql_conn, table, [days_ago(2)] * 20 + [hours_ago(1)] * 10)
+    # 数据：2 天前 20 行（过期可删），半小时前 10 行（保留期 1 小时，留足余量
+    # 避免测试流程耗时跨过过期边界导致 flaky）
+    insert_rows(mysql_conn, table, [days_ago(2)] * 20 + [hours_ago(0.5)] * 10)
 
     # dry-run 不写
     r = runner.invoke(main, ["-c", cfg, "run", "--job", "demo", "--once", "--dry-run"])

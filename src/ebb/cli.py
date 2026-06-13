@@ -189,10 +189,11 @@ def run(ctx: click.Context, job_name: str, once: bool, dry_run: bool) -> None:  
 @click.option("--job", "job_name", required=True)
 @click.option("--from", "from_str", default=None, help="start date YYYY-MM-DD; defaults to the earliest online day")
 @click.option("--to", "to_str", default=None, help="end date YYYY-MM-DD (inclusive); defaults to yesterday (job timezone)")
+@click.option("--force", is_flag=True, help="bypass the unarchived-gap guard (may leave rows the incremental export will never pick up)")
 @click.pass_context
-def backfill(ctx: click.Context, job_name: str, from_str: str | None, to_str: str | None) -> None:
+def backfill(ctx: click.Context, job_name: str, from_str: str | None, to_str: str | None, force: bool) -> None:
     """Backfill history day by day. Default range is earliest online day ~ yesterday; today is left to incremental export."""
-    from .backfill import earliest_day, run_backfill
+    from .backfill import BackfillRefused, earliest_day, run_backfill
 
     config = _load(ctx)
     job = _select_jobs(config, job_name)[0]
@@ -220,7 +221,25 @@ def backfill(ctx: click.Context, job_name: str, from_str: str | None, to_str: st
             + _rows_progress(p["processed_rows"], p["total_rows"], p["elapsed_seconds"])
         )
 
-    result = run_backfill(config, job, from_day, to_day, on_progress=on_progress)
+    def on_warning(msg: str) -> None:
+        click.echo(click.style(f"warning: {msg}", fg="yellow"), err=True)
+
+    try:
+        result = run_backfill(
+            config, job, from_day, to_day,
+            force=force, on_progress=on_progress, on_warning=on_warning,
+        )
+    except BackfillRefused as exc:
+        raise click.ClickException(str(exc)) from exc
+    except (KeyboardInterrupt, Exception):
+        # 中断/异常退出：已写部分文件、水位可能已抬高。跨天 id 交错处必须重跑
+        # 相同区间补齐，否则增量会跳过水位之下的行（见 run_backfill 的交错警告）。
+        click.echo(
+            "backfill interrupted/failed: re-run the SAME --from/--to range to fill any "
+            "gap, otherwise rows below the new watermark may be skipped by incremental export",
+            err=True,
+        )
+        raise
     click.echo(
         f"backfill done: {_fmt_int(result.rows)} rows, {result.bytes} bytes, "
         f"{len(result.days)} days, took {result.duration_seconds}s"
@@ -270,7 +289,7 @@ def purge_cmd(ctx: click.Context, job_name: str, dry_run: bool) -> None:
         elif stage == "verify":
             click.echo(
                 f"verifying archived data for id [{_fmt_int(p['from_id'])}, {_fmt_int(p['to_id'])}] "
-                f"(row count + id sum) ..."
+                f"(per-id anti-join) ..."
             )
         elif stage == "delete":
             if p["deleted_rows"] >= p["eligible_rows"] or throttle.ready():

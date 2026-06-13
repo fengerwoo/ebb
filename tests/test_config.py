@@ -65,6 +65,20 @@ def test_duplicate_job_name():
         Config.model_validate(bad)
 
 
+def test_duplicate_prefix_rejected():
+    """同一 bucket 下两个 job 用相同 prefix：水位互相污染，必须拒绝。"""
+    j2 = {**BASE["jobs"][0], "name": "j2"}
+    bad = {**BASE, "jobs": [BASE["jobs"][0], j2]}
+    with pytest.raises(ValidationError, match="prefix"):
+        Config.model_validate(bad)
+
+
+def test_same_prefix_different_bucket_allowed():
+    storages = {**BASE["storages"], "s2": {**BASE["storages"]["s1"], "bucket": "b2"}}
+    j2 = {**BASE["jobs"][0], "name": "j2", "storage": "s2"}
+    Config.model_validate({**BASE, "storages": storages, "jobs": [BASE["jobs"][0], j2]})
+
+
 def test_bad_identifier_rejected():
     bad_job = {**BASE["jobs"][0], "table": "logs; DROP TABLE x"}
     with pytest.raises(ValidationError):
@@ -101,6 +115,17 @@ def test_endpoint_url_variants():
     aws = StorageConfig(bucket="b", access_key_id="a", secret_access_key="s")
     assert aws.endpoint_url is None
     assert aws.duckdb_endpoint == ""
+
+
+def test_listen_must_have_port():
+    for bad_listen in ["0.0.0.0", "localhost:", "host:abc", "host:99999"]:
+        bad = {**BASE, "query_api": {"enabled": False, "listen": bad_listen}}
+        with pytest.raises(ValidationError, match="listen"):
+            Config.model_validate(bad)
+    ok = Config.model_validate(
+        {**BASE, "query_api": {"enabled": False, "listen": "127.0.0.1:18761"}}
+    )
+    assert ok.query_api.host_port == ("127.0.0.1", 18761)
 
 
 def test_prefix_normalized():

@@ -120,6 +120,32 @@ def test_export_safety_lag_excludes_fresh_rows(mysql_conn, uniq):
     assert result.watermark_after == 10
 
 
+def test_export_safety_lag_includes_inverted_rows(mysql_conn, uniq):
+    """时间列与 id 在安全线附近倒挂时不得漏行：id 截断把「小 id、新时间」
+    的行一并导出，而不是按时间过滤后被水位永久跳过。"""
+    table, prefix, config, job = _setup(mysql_conn, uniq, safety_lag_seconds=3600)
+    insert_rows(mysql_conn, table, [hours_ago(2)] * 10)  # id 1-10 旧
+    insert_rows(mysql_conn, table, [hours_ago(0)])  # id 11 新（与 id 12 倒挂）
+    insert_rows(mysql_conn, table, [hours_ago(2)])  # id 12 旧
+
+    result = run_export(config, job)
+    assert result.rows == 12  # id 11 必须包含在内
+    assert result.watermark_after == 12
+    assert result.lag_rows == 0
+
+
+def test_export_safety_lag_no_safe_rows_is_empty(mysql_conn, uniq):
+    """安全窗口内没有任何行时走 empty 路径，水位不动。"""
+    table, prefix, config, job = _setup(mysql_conn, uniq, safety_lag_seconds=3600)
+    insert_rows(mysql_conn, table, [hours_ago(0)] * 5)  # 全部是新行
+
+    result = run_export(config, job)
+    assert result.status == "empty"
+    assert result.watermark_after == 0
+    store = S3Store(config.storage_of(job))
+    assert store.list_keys(prefix) == []
+
+
 def test_export_dry_run_writes_nothing(mysql_conn, uniq):
     table, prefix, config, job = _setup(mysql_conn, uniq)
     insert_rows(mysql_conn, table, [hours_ago(2)] * 30)

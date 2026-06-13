@@ -12,7 +12,7 @@ import secrets
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .config import Config
 from .logs import log_error
@@ -22,7 +22,7 @@ from .registry import Registry
 
 class QueryRequest(BaseModel):
     sql: str
-    max_rows: int | None = None
+    max_rows: int | None = Field(default=None, ge=1)  # 非正数直接 422，避免进入 fetchmany
 
 
 def build_query_app(config: Config) -> FastAPI:

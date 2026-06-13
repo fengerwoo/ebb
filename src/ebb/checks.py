@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import engine, mysqlutil
+from . import engine, mysqlutil, timeutil
 from .config import Config, JobConfig
 
 INT_TYPES = ("int", "bigint", "mediumint", "smallint", "tinyint")
@@ -41,9 +41,13 @@ def check_job(config: Config, job: JobConfig) -> CheckReport:
 
     # MySQL 连接与表结构
     columns: dict[str, str] = {}
+    unique_cols: set[str] = set()
+    nullable_cols: set[str] = set()
     try:
         with mysqlutil.connect(source) as conn:
             columns = mysqlutil.table_columns(conn, job.table)
+            unique_cols = mysqlutil.single_column_unique_columns(conn, job.table)
+            nullable_cols = mysqlutil.nullable_columns(conn, job.table)
         report.add("mysql.connect", True, f"table {job.table} has {len(columns)} columns")
     except Exception as exc:
         report.add("mysql.connect", False, f"{type(exc).__name__}: {exc}")
@@ -55,6 +59,14 @@ def check_job(config: Config, job: JobConfig) -> CheckReport:
         elif not any(cur_type.startswith(t) for t in INT_TYPES):
             report.add(
                 "mysql.cursor_column", False, f"cursor column must be an integer type, got: {cur_type}"
+            )
+        elif job.cursor_column not in unique_cols:
+            # 游标列不唯一时，同 id 的行会被 `id > 水位` 部分跳过，水位语义崩塌
+            report.add(
+                "mysql.cursor_column",
+                False,
+                f"{cur_type}, but no single-column unique index (PRIMARY/UNIQUE) on it; "
+                f"watermark requires the cursor column to be unique",
             )
         else:
             report.add("mysql.cursor_column", True, cur_type)
@@ -71,8 +83,55 @@ def check_job(config: Config, job: JobConfig) -> CheckReport:
                     False,
                     f"time_column_type={job.time_column_type} does not match actual type {time_type}",
                 )
+            elif job.time_column in nullable_cols:
+                # 时间列可空：NULL 行会推导出 dt=None 垃圾分区（不参与水位、却被
+                # 查询通配符命中），且 purge 时间谓词对 NULL 恒假，这些行永远不会
+                # 被清理、永久留在线上。要求 NOT NULL，从结构上杜绝。
+                report.add(
+                    "mysql.time_column",
+                    False,
+                    f"{time_type}, but column is nullable; time_column must be NOT NULL "
+                    f"(NULL values are never purged and create a dt=None partition)",
+                )
             else:
                 report.add("mysql.time_column", True, time_type)
+
+        # 活跃事务守卫的前置条件：自增游标列 + PROCESS 权限
+        if job.batch.trx_guard:
+            try:
+                with mysqlutil.connect(source) as conn:
+                    nxt = mysqlutil.autoinc_next(
+                        conn, source.parts["database"], job.table, job.cursor_column
+                    )
+                    mysqlutil.active_write_trx_ids(conn)
+                if nxt is None:
+                    report.add(
+                        "mysql.trx_guard",
+                        False,
+                        "cursor column is not AUTO_INCREMENT; "
+                        "fix the schema or set batch.trx_guard=false",
+                    )
+                else:
+                    report.add("mysql.trx_guard", True, f"next auto_increment={nxt}")
+            except Exception as exc:
+                report.add(
+                    "mysql.trx_guard",
+                    False,
+                    f"cannot read innodb_trx (PROCESS privilege required): "
+                    f"{type(exc).__name__}: {exc}",
+                )
+
+        # dt 是查询侧的 hive 分区列，__dt / __ebb_ts 是导出时的内部辅助列，
+        # 业务表占用这些名字会导致分区冲突或导出列名冲突
+        reserved = {"dt", "__dt", timeutil.EPOCH_COLUMN} & set(columns)
+        if reserved:
+            report.add(
+                "mysql.reserved_columns",
+                False,
+                f"column names conflict with internal/partition columns: {sorted(reserved)}",
+            )
+        else:
+            report.add("mysql.reserved_columns", True)
 
     # 对象存储读写删
     try:

@@ -67,10 +67,11 @@ jobs:
       export_rows: 500000          # 单轮导出行数上限，追不平下一轮继续。Per-round export row cap; the next round continues if behind.
       delete_rows: 5000            # 删除批大小。Delete batch size.
       delete_sleep_ms: 200         # 删除批间隔（毫秒）。Pause between delete batches in milliseconds.
-      safety_lag_seconds: 5        # 只导出早于 now-N秒 的行，规避自增 id 提交乱序漏读。Only export rows older than now - N seconds, avoiding misses from out-of-order auto-increment id commits.
+      safety_lag_seconds: 5        # 只导出早于 now-N秒 的行，规避自增 id 提交乱序漏读；同时充当 trx_guard 的观察窗口时长。Only export rows older than now - N seconds, avoiding misses from out-of-order auto-increment id commits; also used as the trx_guard observation window.
+      trx_guard: true              # 活跃事务守卫：机制级杜绝「小 id 事务晚提交」漏归档，检测到跨窗口写事务时本轮停写；需要 PROCESS 权限与自增游标列（ebb check 校验）。Active-transaction guard: mechanically prevents losing late-committed low ids by stalling the round when a write transaction spans the observation window; requires PROCESS privilege and an AUTO_INCREMENT cursor column (validated by ebb check).
     retention:
       online_retain_seconds: 86400 # 线上保留时长（秒），86400 = 1 天。Online retention in seconds; 86400 = 1 day.
-      verify_before_delete: true   # 99%情况保持true，删除前对比 MySQL 与 Parquet 行数 + id 和。Keep true in 99% of cases; before deleting, compare row count + id sum between MySQL and Parquet.
+      verify_before_delete: true   # 99%情况保持true，删除前逐 id 校验「本轮待删的行都已在 Parquet」（包含关系，倒挂幸存行留下的洞不影响校验）。Keep true in 99% of cases; before deleting, verify per id that every row about to be deleted exists in Parquet (subset check; holes left by surviving inverted rows do not fail it).
 
 # HTTP 查询 API（可选）。POST /query {"sql": "SELECT ..."}，
 # Header: Authorization: Bearer <key>。每个 job 自动注册同名视图（默认取表名）。

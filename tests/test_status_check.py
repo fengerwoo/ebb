@@ -20,7 +20,23 @@ def test_check_all_green(mysql_conn, uniq):
     assert report.ok, [f"{i.name}: {i.detail}" for i in report.items if not i.ok]
     names = {i.name for i in report.items}
     assert names == {"mysql.connect", "mysql.cursor_column", "mysql.time_column",
+                     "mysql.trx_guard", "mysql.reserved_columns",
                      "storage.rw", "duckdb.extensions"}
+
+
+def test_check_reserved_column_conflict(mysql_conn, uniq):
+    """业务表占用 dt / __dt / __ebb_ts 这类内部名时 check 必须报错。"""
+    table = f"logs_{uniq}"
+    with mysql_conn.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+        cur.execute(
+            f"CREATE TABLE `{table}` ("
+            f"id BIGINT AUTO_INCREMENT PRIMARY KEY, "
+            f"created_at BIGINT NOT NULL, dt VARCHAR(10))"
+        )
+    config = make_config(table, f"t/{uniq}")
+    report = check_job(config, config.jobs[0])
+    assert any(i.name == "mysql.reserved_columns" and not i.ok for i in report.items)
 
 
 def test_check_missing_table(mysql_conn, uniq):
@@ -42,6 +58,52 @@ def test_check_type_mismatch(mysql_conn, uniq):
     bad = make_config(table, prefix, time_column_type="unix_s")
     report = check_job(bad, bad.jobs[0])
     assert any(i.name == "mysql.time_column" and not i.ok for i in report.items)
+
+
+def test_check_nullable_time_column(mysql_conn, uniq):
+    """时间列可空必须报错：NULL 时间值生成 dt=None 垃圾分区，且 purge 时间谓词
+    对 NULL 恒假——这些行永远不会被清理、永久留在线上。"""
+    table = f"logs_{uniq}"
+    with mysql_conn.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+        cur.execute(
+            f"""
+            CREATE TABLE `{table}` (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                created_at BIGINT NULL,
+                user_id INT NOT NULL
+            )
+            """
+        )
+    config = make_config(table, f"t/{uniq}")  # 默认 unix_s，类型匹配，只差可空
+    report = check_job(config, config.jobs[0])
+    assert any(
+        i.name == "mysql.time_column" and not i.ok and "NOT NULL" in i.detail
+        for i in report.items
+    )
+
+
+def test_check_cursor_without_unique_index(mysql_conn, uniq):
+    """游标列没有单列唯一索引（主键/UNIQUE）时 check 必须报错：
+    游标不唯一会破坏水位语义（同 id 行被部分跳过）。"""
+    table = f"logs_{uniq}"
+    with mysql_conn.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+        cur.execute(
+            f"""
+            CREATE TABLE `{table}` (
+                id BIGINT NOT NULL,
+                created_at BIGINT NOT NULL,
+                KEY idx_id (id)
+            )
+            """
+        )
+    config = make_config(table, f"t/{uniq}")
+    report = check_job(config, config.jobs[0])
+    assert any(
+        i.name == "mysql.cursor_column" and not i.ok and "unique" in i.detail
+        for i in report.items
+    )
 
 
 def test_check_bad_storage(mysql_conn, uniq):

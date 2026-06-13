@@ -105,6 +105,9 @@ def serve(config: Config, stop_event: threading.Event | None = None) -> None:
         if not job.schedule.enabled:
             log("serve", status="schedule_disabled", job=job.name)
             continue
+        # misfire_grace_time=None：触发点被错过（进程暂停、时钟跳变、调度线程
+        # 阻塞超过默认 1 秒宽限）时迟到补跑一次（coalesce 只补一次），而不是
+        # 静默丢弃——export/compact/purge 都幂等，晚跑安全，跳过才危险
         scheduler.add_job(
             _run_export_job,
             IntervalTrigger(seconds=job.schedule.interval_seconds),
@@ -112,6 +115,7 @@ def serve(config: Config, stop_event: threading.Event | None = None) -> None:
             id=f"export:{job.name}",
             max_instances=1,
             coalesce=True,
+            misfire_grace_time=None,
             next_run_time=datetime.now(),  # 启动立即先跑一轮
         )
         hour, minute = job.schedule.compact_hour_minute
@@ -122,11 +126,13 @@ def serve(config: Config, stop_event: threading.Event | None = None) -> None:
             id=f"daily:{job.name}",
             max_instances=1,
             coalesce=True,
+            misfire_grace_time=None,
         )
         if job.schedule.purge_interval_seconds:
             # 独立 purge 周期（保留期短于一天的场景）。与凌晨 compact 可能并发：
-            # 合并改名与删源之间的瞬间会让校验多算一次行数，校验失败即跳过本轮，
-            # 下一轮重新推导边界继续，无正确性风险。
+            # 合并改名与删源之间 inc 与 data 文件短暂并存，待删 id 在 Parquet 里
+            # 重复出现，但 purge 校验是逐 id 反连接（只看「待删 ⊆ 归档」的包含
+            # 关系），对重复行免疫，不会因此误判，无正确性风险。
             scheduler.add_job(
                 _run_purge_job,
                 IntervalTrigger(seconds=job.schedule.purge_interval_seconds),
@@ -134,6 +140,7 @@ def serve(config: Config, stop_event: threading.Event | None = None) -> None:
                 id=f"purge:{job.name}",
                 max_instances=1,
                 coalesce=True,
+                misfire_grace_time=None,
             )
 
     def _refresh_next_runs() -> None:

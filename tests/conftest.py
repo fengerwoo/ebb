@@ -97,6 +97,7 @@ def make_config(
     retain_seconds: int = 86400,
     export_rows: int = 500_000,
     safety_lag_seconds: int = 0,
+    timezone: str = "Asia/Shanghai",
     api_keys: list[str] | None = None,
 ) -> Config:
     return Config.model_validate(
@@ -121,7 +122,7 @@ def make_config(
                     "cursor_column": "id",
                     "time_column": time_column,
                     "time_column_type": time_column_type,
-                    "timezone": "Asia/Shanghai",
+                    "timezone": timezone,
                     "storage": "minio",
                     "prefix": prefix,
                     "schedule": {"interval_seconds": 300, "compact_at": "03:00"},

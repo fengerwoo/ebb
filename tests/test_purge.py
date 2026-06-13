@@ -60,6 +60,26 @@ def test_purge_in_batches(mysql_conn, uniq):
     assert _count(mysql_conn, table) == 0
 
 
+def test_purge_keeps_inverted_hot_rows(mysql_conn, uniq):
+    """bound 区间内时间倒挂的未过期行不能被删：删除带时间条件，
+    只按 id <= bound 会把这类行提前下线。"""
+    table, prefix, config, job = _setup(mysql_conn, uniq, retain_seconds=86400)
+    insert_rows(mysql_conn, table, [days_ago(2)] * 10)  # id 1-10 过期
+    insert_rows(mysql_conn, table, [hours_ago(1)])  # id 11 未过期（倒挂）
+    insert_rows(mysql_conn, table, [days_ago(2)])  # id 12 过期
+    run_export(config, job)
+
+    result = run_purge(config, job)
+    assert result.status == "ok"
+    assert result.bound_id == 12
+    assert result.eligible_rows == 11  # 不含倒挂的 id 11
+    assert result.deleted_rows == 11
+    assert _count(mysql_conn, table) == 1
+    with mysql_conn.cursor() as cur:
+        cur.execute(f"SELECT id FROM `{table}`")
+        assert cur.fetchone()[0] == 11  # 留下的正是未过期那行
+
+
 def test_purge_dry_run(mysql_conn, uniq):
     table, prefix, config, job = _setup(mysql_conn, uniq, retain_seconds=3600)
     insert_rows(mysql_conn, table, [days_ago(2)] * 15)
@@ -100,8 +120,30 @@ def test_purge_verify_failure_blocks_delete(mysql_conn, uniq):
 
     result = run_purge(config, job)
     assert result.status == "verify-failed"
-    assert "rows=50" in result.detail or "rows=1" in result.detail
+    assert "未在 Parquet 中" in result.detail
     assert _count(mysql_conn, table) == 50  # 一行未删
+
+
+def test_purge_verify_tolerates_compact_window_duplicates(mysql_conn, uniq):
+    """compact 改名后、删源前的瞬间，分区内 data 与 inc 并存（行重复）。
+    包含语义的校验只关心「待删行是否在 Parquet」，重复不应误报。"""
+    table, prefix, config, job = _setup(mysql_conn, uniq, retain_seconds=3600)
+    insert_rows(mysql_conn, table, [days_ago(2)] * 20)
+    exported = run_export(config, job)
+
+    # 模拟 compact 卡在中间态：inc 文件复制出一份同区间的 data 文件，二者并存
+    store = S3Store(config.storage_of(job))
+    src = exported.files[0]
+    f = naming.parse_key(prefix, src)
+    dup = naming.data_key(prefix, f.dt, f.from_id, f.to_id)
+    store.client.copy_object(
+        Bucket=store.bucket, Key=dup, CopySource={"Bucket": store.bucket, "Key": src}
+    )
+
+    result = run_purge(config, job)
+    assert result.status == "ok"
+    assert result.deleted_rows == 20
+    assert _count(mysql_conn, table) == 0
 
 
 def test_purge_skip_verify_when_disabled(mysql_conn, uniq):

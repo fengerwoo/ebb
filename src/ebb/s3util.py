@@ -7,9 +7,17 @@
 from __future__ import annotations
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 from botocore.config import Config as BotoConfig
 
 from .config import StorageConfig
+
+# 服务端拷贝的分片策略：单次 CopyObject 有大小上限（AWS 5GB、阿里云 OSS 1GB），
+# 超过阈值自动切到 UploadPartCopy 分片拷贝；阈值以下仍是单请求，无额外开销
+_COPY_CONFIG = TransferConfig(
+    multipart_threshold=512 * 1024 * 1024,
+    multipart_chunksize=256 * 1024 * 1024,
+)
 
 
 def make_client(storage: StorageConfig):
@@ -60,11 +68,16 @@ class S3Store:
         return self.client.head_object(Bucket=self.bucket, Key=key)["ContentLength"]
 
     def rename(self, src_key: str, dst_key: str) -> None:
-        """S3 没有原生 rename：服务端 copy + 删除源。"""
-        self.client.copy_object(
+        """S3 没有原生 rename：服务端 copy + 删除源。
+
+        用托管 copy 而不是裸 copy_object：合并后的天级文件可能超过单次
+        CopyObject 的大小上限，托管接口超阈值自动分片，始终在服务端完成。
+        """
+        self.client.copy(
+            CopySource={"Bucket": self.bucket, "Key": src_key},
             Bucket=self.bucket,
             Key=dst_key,
-            CopySource={"Bucket": self.bucket, "Key": src_key},
+            Config=_COPY_CONFIG,
         )
         self.client.delete_object(Bucket=self.bucket, Key=src_key)
 
