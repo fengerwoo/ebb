@@ -140,7 +140,7 @@ GROUP BY dt ORDER BY dt;
 
 支持 Skills 的 Agent 可以使用仓库内置的只读查询 Skill，直接发送这一句话：
 
-> 请安装 https://github.com/fengerwoo/ebb/tree/main/skills/ebb-query-data，安装后阅读并遵循 SKILL.md；若尚无配置，先询问我要使用项目级、全局还是自定义路径，只复制示例配置并 chmod 600，由我自行填写凭据，不要读取或打印真实配置。
+> 请安装 https://github.com/fengerwoo/ebb/tree/main/skills/ebb-query-data ，安装后阅读并遵循 SKILL.md；若尚无配置，先询问我要使用项目级、全局还是自定义路径，只复制示例配置并 chmod 600，由我自行填写凭据，不要读取或打印真实配置。
 
 也可以把只读对象存储凭证发给可信使用方，对方本地 DuckDB / DBeaver 直查，不经过本服务：
 
