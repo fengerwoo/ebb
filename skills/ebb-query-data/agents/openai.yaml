@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ebb Query Data"
+  short_description: "Query Ebb archives with read-only SQL"
+  default_prompt: "Use $ebb-query-data to inspect and query archived Ebb data safely."

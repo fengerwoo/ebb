@@ -136,7 +136,13 @@ WHERE dt BETWEEN '2026-06-01' AND '2026-06-12'
 GROUP BY dt ORDER BY dt;
 ```
 
-`WHERE dt = ...` 自动做分区裁剪。也可以把只读对象存储凭证发给可信使用方，对方本地 DuckDB / DBeaver 直查，不经过本服务：
+`WHERE dt = ...` 自动做分区裁剪。
+
+支持 Skills 的 Agent 可以使用仓库内置的只读查询 Skill，直接发送这一句话：
+
+> 请安装 https://github.com/fengerwoo/ebb/tree/main/skills/ebb-query-data，安装后阅读并遵循 SKILL.md；若尚无配置，先询问我要使用项目级、全局还是自定义路径，只复制示例配置并 chmod 600，由我自行填写凭据，不要读取或打印真实配置。
+
+也可以把只读对象存储凭证发给可信使用方，对方本地 DuckDB / DBeaver 直查，不经过本服务：
 
 ```sql
 INSTALL httpfs; LOAD httpfs;
@@ -300,7 +306,13 @@ WHERE dt BETWEEN '2026-06-01' AND '2026-06-12'
 GROUP BY dt ORDER BY dt;
 ```
 
-`WHERE dt = ...` gets partition pruning automatically. You can also hand read-only object storage credentials to trusted consumers, who query directly with local DuckDB / DBeaver, bypassing this service entirely:
+`WHERE dt = ...` gets partition pruning automatically.
+
+For an agent that supports Skills, send this single instruction to install the repository's bundled read-only query Skill:
+
+> Install https://github.com/fengerwoo/ebb/tree/main/skills/ebb-query-data, then read and follow SKILL.md; if no configuration exists, first ask whether I want a project-level, user-global, or custom path, copy only the example configuration there and run chmod 600, then let me enter the credentials myself without reading or printing the real configuration.
+
+You can also hand read-only object storage credentials to trusted consumers, who query directly with local DuckDB / DBeaver, bypassing this service entirely:
 
 ```sql
 INSTALL httpfs; LOAD httpfs;

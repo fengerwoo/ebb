@@ -1,0 +1,41 @@
+# Copy this file to <project-root>/ebb-query-data.yaml and keep that file out of Git.
+version: 1
+
+storages:
+  archive-store:
+    type: s3
+    endpoint: storage.example.com
+    bucket: example-archive-bucket
+    access_key_id: EXAMPLE_ACCESS_KEY
+    secret_access_key: REPLACE_ME
+    region: us-east-1
+    url_style: path
+    use_ssl: true
+
+databases:
+  analytics:
+    description: Analytical archive datasets
+    tables:
+      events:
+        storage: archive-store
+        prefix: analytics/events
+        description: Archived event records
+
+      metrics:
+        storage: archive-store
+        prefix: analytics/metrics
+        description: Archived metric records
+
+  operations:
+    description: Operational archive datasets
+    tables:
+      events:
+        storage: archive-store
+        prefix: operations/events
+        description: Archived event records
+
+query:
+  default_database: null
+  max_rows: 500000
+  max_result_bytes: 100000000
+  timeout_seconds: 900

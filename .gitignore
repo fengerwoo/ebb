@@ -1,6 +1,7 @@
 # 私有文档与配置
 docs/
 config.yml
+/ebb-query-data.yaml
 
 # Python
 __pycache__/
@@ -11,6 +12,7 @@ build/
 dist/
 .venv/
 venv/
+node_modules/
 
 # 测试与工具
 .pytest_cache/
